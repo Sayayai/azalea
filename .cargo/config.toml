@@ -1,0 +1,9 @@
+# 开启 LLD 链接器以缩短 Windows 平台的链接时间
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld"]

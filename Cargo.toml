@@ -1,0 +1,33 @@
+[package]
+name = "azalea_bot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+azalea = { path = "./azalea-main/azalea", features = ["online-mode"] }
+tokio = { version = "1", features = ["full"] }
+parking_lot = "0.12"
+
+eyre = "0.6"
+serde_yaml = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+futures = "0.3"
+serde_json = "1.0"
+uuid = "1"
+
+
+# 优化本地编译速度与运行性能平衡
+[profile.dev]
+opt-level = 0        # 本地代码零优化，提升增量编译速度
+split-debuginfo = "unpacked" # 减少 Windows 平台的调试信息打包时间
+
+[profile.dev.package."*"]
+opt-level = 3        # 外部依赖包采用最高优化，使本地调试时第三方库足够快
+
+# 云端发布极致优化配置
+[profile.release]
+opt-level = 3        # 极致代码优化
+lto = true           # 开启 Link Time Optimization (LTO)
+codegen-units = 1    # 减少 codegen 单元，做到极致优化
+panic = "abort"      # 减小体积并提升性能
+strip = true         # 剥离所有调试符号以减小二进制体积

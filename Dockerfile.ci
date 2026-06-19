@@ -1,0 +1,13 @@
+FROM gcr.io/distroless/static-debian13:latest
+
+# TARGETARCH will be automatically set by docker buildx (e.g., amd64, arm64)
+ARG TARGETARCH
+
+# Copy the pre-compiled static binary matching the architecture
+COPY ./bin/azalea_bot_${TARGETARCH} /app/azalea_bot
+
+# Use the built-in non-root user for security
+USER nonroot:nonroot
+
+WORKDIR /app
+ENTRYPOINT ["/app/azalea_bot"]
