@@ -1,16 +1,18 @@
-name: CI
+name: CI/CD Build & Publish
 
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-rust:
     name: Build - ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     strategy:
@@ -20,18 +22,19 @@ jobs:
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            output_name: azalea_bot_win_x64.exe
           # Windows ARM64 (aarch64)
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-          # Linux x86_64
+            output_name: azalea_bot_win_arm64.exe
+          # Linux x86_64 (using musl for static linking)
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          # Linux ARM64 (aarch64)
+            target: x86_64-unknown-linux-musl
+            output_name: azalea_bot_linux_x64
+          # Linux ARM64 (using musl for static linking on native ARM64 runner)
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          # macOS ARM64
-          - os: macos-latest
-            target: aarch64-apple-darwin
+            target: aarch64-unknown-linux-musl
+            output_name: azalea_bot_linux_arm64
 
     steps:
     - name: Checkout repository
@@ -47,22 +50,135 @@ jobs:
         toolchain: nightly
         targets: ${{ matrix.job.target }}
 
+    - name: Install Musl Tools (Linux only)
+      if: contains(matrix.job.target, 'linux-musl')
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
       with:
         key: ${{ matrix.job.target }}
 
     - name: Build (Release Mode for Extreme Optimization)
+      env:
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       run: |
         cargo build --release --target ${{ matrix.job.target }}
 
     - name: Test (Only run tests on native runners)
       # 排除非原生运行的交叉编译目标（如 Windows ARM64 运行在 x64 runner 上）
-      # ubuntu-latest 和 ubuntu-24.04-arm64 可以运行对应的原生测试，macos-latest(M1) 可以运行 aarch64 测试，windows-latest 可以运行 x86_64 测试
+      # ubuntu-latest 和 ubuntu-24.04-arm 可以运行各自的原生测试，windows-latest 可以运行 x86_64 测试
       if: |
-        matrix.job.target == 'x86_64-unknown-linux-gnu' ||
-        matrix.job.target == 'aarch64-unknown-linux-gnu' ||
-        matrix.job.target == 'x86_64-pc-windows-msvc' ||
-        matrix.job.target == 'aarch64-apple-darwin'
+        matrix.job.target == 'x86_64-unknown-linux-musl' ||
+        matrix.job.target == 'aarch64-unknown-linux-musl' ||
+        matrix.job.target == 'x86_64-pc-windows-msvc'
       run: |
         cargo test --release --target ${{ matrix.job.target }}
+
+    - name: Prepare Binary
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp target/${{ matrix.job.target }}/release/azalea_bot dist/${{ matrix.job.output_name }} || cp target/${{ matrix.job.target }}/release/azalea_bot.exe dist/${{ matrix.job.output_name }}
+
+    - name: Upload Temporary Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: temp-binary-${{ matrix.job.output_name }}
+        path: dist/${{ matrix.job.output_name }}
+        retention-days: 1
+
+  publish:
+    name: Package Binaries & Push Docker Image
+    needs: build-rust
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download Windows x64 Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: temp-binary-azalea_bot_win_x64.exe
+        path: bin-temp
+
+    - name: Download Windows ARM64 Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: temp-binary-azalea_bot_win_arm64.exe
+        path: bin-temp
+
+    - name: Download Linux x64 Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: temp-binary-azalea_bot_linux_x64
+        path: bin-temp
+
+    - name: Download Linux ARM64 Binary
+      uses: actions/download-artifact@v4
+      with:
+        name: temp-binary-azalea_bot_linux_arm64
+        path: bin-temp
+
+    - name: Organize Binaries for Final Output
+      run: |
+        mkdir -p final-binaries
+        cp bin-temp/azalea_bot_win_x64.exe final-binaries/
+        cp bin-temp/azalea_bot_win_arm64.exe final-binaries/
+        cp bin-temp/azalea_bot_linux_x64 final-binaries/
+        cp bin-temp/azalea_bot_linux_arm64 final-binaries/
+        ls -lah final-binaries/
+
+    - name: Upload Clean Binaries Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: azalea_bot-binaries
+        path: final-binaries/
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/${{ github.repository }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=tag
+          type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+    - name: Prepare Binaries for Docker Context
+      run: |
+        mkdir -p bin
+        # 将二进制拷贝为 Dockerfile.ci 所需的格式 (e.g. azalea_bot_amd64 and azalea_bot_arm64)
+        cp bin-temp/azalea_bot_linux_x64 bin/azalea_bot_amd64
+        cp bin-temp/azalea_bot_linux_arm64 bin/azalea_bot_arm64
+        chmod +x bin/azalea_bot_amd64 bin/azalea_bot_arm64
+        ls -lah bin/
+
+    - name: Build and Push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.ci
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
