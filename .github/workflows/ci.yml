@@ -27,7 +27,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           # Linux ARM64 (aarch64)
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm64
             target: aarch64-unknown-linux-gnu
           # macOS ARM64
           - os: macos-latest
@@ -47,29 +47,21 @@ jobs:
         toolchain: nightly
         targets: ${{ matrix.job.target }}
 
-    - name: Install Cross-Compilation Toolchain (Linux ARM64)
-      if: matrix.job.target == 'aarch64-unknown-linux-gnu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu
-
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
       with:
         key: ${{ matrix.job.target }}
 
     - name: Build (Release Mode for Extreme Optimization)
-      env:
-        # 为 Linux ARM64 交叉编译设置链接器
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.job.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
       run: |
         cargo build --release --target ${{ matrix.job.target }}
 
     - name: Test (Only run tests on native runners)
       # 排除非原生运行的交叉编译目标（如 Windows ARM64 运行在 x64 runner 上）
-      # ubuntu-latest 可以运行 x86_64 测试，macos-latest(M1) 可以运行 aarch64 测试，windows-latest 可以运行 x86_64 测试
+      # ubuntu-latest 和 ubuntu-24.04-arm64 可以运行对应的原生测试，macos-latest(M1) 可以运行 aarch64 测试，windows-latest 可以运行 x86_64 测试
       if: |
         matrix.job.target == 'x86_64-unknown-linux-gnu' ||
+        matrix.job.target == 'aarch64-unknown-linux-gnu' ||
         matrix.job.target == 'x86_64-pc-windows-msvc' ||
         matrix.job.target == 'aarch64-apple-darwin'
       run: |
