@@ -27,6 +27,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Clone Azalea Dependency
+      run: |
+        git clone --depth 1 https://github.com/azalea-rs/azalea.git azalea-main
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
