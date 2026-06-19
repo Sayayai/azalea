@@ -2,23 +2,33 @@ use std::sync::Arc;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, VecDeque};
 use azalea::prelude::*;
 use azalea::interact::SwingArmEvent;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use serde::{Deserialize, Serialize};
+use axum::{
+    routing::{get, post},
+    Json, Router, extract::State as AxumState, response::Html,
+};
 
 #[derive(Default, Clone, Component)]
-pub struct State {
+pub struct BotState {
     pub look_direction: Arc<Mutex<Option<(f32, f32)>>>, // Option<(y_rot, x_rot)>
     pub use_interval: Arc<Mutex<Option<usize>>>, // None = off, Some(0) = every tick (hold), Some(n) = every n ticks
     pub atk_interval: Arc<Mutex<Option<usize>>>, // None = off, Some(0) = every tick (hold), Some(n) = every n ticks
     pub use_counter: Arc<Mutex<usize>>,
     pub atk_counter: Arc<Mutex<usize>>,
+    pub global_state: Option<Arc<RwLock<GlobalAppState>>>,
+    pub cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<BotCommand>>,
+    pub alias: Option<String>,
+    pub server: Option<String>,
 }
 
 // YAML 配置文件结构
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct BotConfig {
     pub look: Option<String>,
     #[serde(rename = "use", default)]
@@ -28,6 +38,56 @@ pub struct BotConfig {
 }
 
 pub type AppConfig = std::collections::HashMap<String, std::collections::HashMap<String, BotConfig>>;
+
+#[derive(Clone, Serialize)]
+pub struct WebBotStatus {
+    pub online: bool,
+    pub connecting: bool,
+    pub delay: u64,
+    pub pos: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct LogMessage {
+    pub time: String,
+    pub alias: String,
+    pub message: String,
+    pub is_error: bool,
+    pub is_system: bool,
+}
+
+pub struct GlobalAppState {
+    pub configs: HashMap<String, BotConfig>,
+    pub status: HashMap<String, WebBotStatus>,
+    pub logs: VecDeque<LogMessage>,
+}
+
+#[derive(Clone)]
+struct WebContext {
+    _state: Arc<RwLock<GlobalAppState>>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<BotCommand>,
+}
+
+pub enum BotCommand {
+    Start {
+        server: String,
+        alias: String,
+    },
+    Stop {
+        alias: String,
+    },
+    SendChat {
+        alias: String,
+        message: String,
+    },
+    RegisterActiveClient {
+        alias: String,
+        client: Client,
+    },
+    RemoveActiveClient {
+        alias: String,
+    }
+}
 
 fn parse_mode(val_opt: &Option<serde_yaml::Value>) -> Option<usize> {
     match val_opt {
@@ -65,6 +125,114 @@ async fn get_file_created_secs(cache_file: &Path) -> Option<u64> {
     None
 }
 
+fn decrypt_bytes(encrypted_bytes: &[u8], key_bytes: &[u8]) -> Vec<u8> {
+    let mut decrypted_bytes = encrypted_bytes.to_vec();
+    if !key_bytes.is_empty() {
+        for (i, byte) in decrypted_bytes.iter_mut().enumerate() {
+            *byte ^= key_bytes[i % key_bytes.len()];
+        }
+    }
+    decrypted_bytes
+}
+
+fn decrypt_and_parse_cache<T>(
+    contents: &[u8],
+    created_secs: Option<u64>,
+) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    // 1. 尝试直接作为明文 JSON 反序列化
+    if let Ok(data) = serde_json::from_slice::<T>(contents) {
+        return Some(data);
+    }
+
+    // 2. 尝试使用固定的混淆密钥解密
+    let fixed_key = b"azalea-auth-cache-obfuscation-key";
+    let decrypted = decrypt_bytes(contents, fixed_key);
+    if let Ok(data) = serde_json::from_slice::<T>(&decrypted) {
+        return Some(data);
+    }
+
+    // 3. 尝试使用当前文件的创建时间解密
+    if let Some(secs) = created_secs {
+        let key_str = secs.to_string();
+        let decrypted = decrypt_bytes(contents, key_str.as_bytes());
+        if let Ok(data) = serde_json::from_slice::<T>(&decrypted) {
+            return Some(data);
+        }
+    }
+
+    // 4. 尝试使用 "0"（对应创建时间获取失败的情况）解密
+    let decrypted = decrypt_bytes(contents, b"0");
+    if let Ok(data) = serde_json::from_slice::<T>(&decrypted) {
+        return Some(data);
+    }
+
+    // 5. 尝试通过已知明文前缀模板，针对 10 位数字时间戳进行恢复
+    if contents.len() >= 10 {
+        // 模板 A: pretty print 格式 (即 `[\n  {\n    ` -> `[91, 10, 32, 32, 123, 10, 32, 32, 32, 32]`)
+        let template_pretty = [91, 10, 32, 32, 123, 10, 32, 32, 32, 32];
+        let mut possible_key = [0u8; 10];
+        for i in 0..10 {
+            possible_key[i] = contents[i] ^ template_pretty[i];
+        }
+        if possible_key.iter().all(|&b| b.is_ascii_digit()) {
+            let decrypted = decrypt_bytes(contents, &possible_key);
+            if let Ok(data) = serde_json::from_slice::<T>(&decrypted) {
+                return Some(data);
+            }
+        }
+
+        // 模板 B: compact 格式 (即 `[{"cache_ke` -> `[91, 123, 34, 99, 97, 99, 104, 101, 95, 107]`)
+        let template_compact = [91, 123, 34, 99, 97, 99, 104, 101, 95, 107];
+        let mut possible_key = [0u8; 10];
+        for i in 0..10 {
+            possible_key[i] = contents[i] ^ template_compact[i];
+        }
+        if possible_key.iter().all(|&b| b.is_ascii_digit()) {
+            let decrypted = decrypt_bytes(contents, &possible_key);
+            if let Ok(data) = serde_json::from_slice::<T>(&decrypted) {
+                return Some(data);
+            }
+        }
+    }
+
+    None
+}
+
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::new();
+    let mut in_code = false;
+    for c in input.chars() {
+        if c == '\x1b' {
+            in_code = true;
+        } else if in_code {
+            if c.is_ascii_alphabetic() {
+                in_code = false;
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn add_log(state: &Arc<RwLock<GlobalAppState>>, alias: &str, msg: &str, is_error: bool, is_system: bool) {
+    let now = chrono::Local::now().format("%H:%M:%S").to_string();
+    let mut lock = state.write();
+    lock.logs.push_back(LogMessage {
+        time: now,
+        alias: alias.to_string(),
+        message: msg.to_string(),
+        is_error,
+        is_system,
+    });
+    if lock.logs.len() > 1000 {
+        lock.logs.pop_front();
+    }
+}
+
 // 全局活跃机器人管理系统，防 stdin 并发竞争
 static ACTIVE_BOTS: OnceLock<Mutex<Vec<Client>>> = OnceLock::new();
 static WELCOME_PRINTED: AtomicBool = AtomicBool::new(false);
@@ -82,6 +250,104 @@ fn remove_active_bot(uuid: &uuid::Uuid) {
         let mut bots = lock.lock();
         bots.retain(|b| b.uuid() != *uuid);
     }
+}
+
+async fn handle_web_bot(bot: Client, event: Event, state: BotState) -> eyre::Result<()> {
+    let bot_key = format!("{}|{}", state.server.as_deref().unwrap_or(""), state.alias.as_deref().unwrap_or(""));
+    let alias = state.alias.clone().unwrap_or_default();
+    
+    match event {
+        Event::Spawn => {
+            let username = bot.username();
+            if let Some(ref g_state) = state.global_state {
+                add_log(g_state, &alias, &format!("机器人 {} 已进入游戏世界！", username), false, true);
+            }
+            
+            if let Some(ref cmd_tx) = state.cmd_tx {
+                let _ = cmd_tx.send(BotCommand::RegisterActiveClient {
+                    alias: alias.clone(),
+                    client: bot.clone(),
+                });
+            }
+
+            if let Some(ref g_state) = state.global_state {
+                let mut lock = g_state.write();
+                if let Some(status) = lock.status.get_mut(&bot_key) {
+                    status.online = true;
+                    status.connecting = false;
+                }
+            }
+        }
+        Event::Chat(m) => {
+            let clean_msg = strip_ansi_codes(&m.message().to_ansi());
+            if let Some(ref g_state) = state.global_state {
+                add_log(g_state, &alias, &clean_msg, false, false);
+            }
+        }
+        Event::Tick => {
+            if let Some((y_rot, x_rot)) = *state.look_direction.lock() {
+                let _ = bot.query_self::<&mut azalea::entity::LookDirection, _>(|mut look| {
+                    look.update(azalea::entity::LookDirection::new(y_rot, x_rot));
+                });
+            }
+
+            let mut use_counter = state.use_counter.lock();
+            let use_interval = *state.use_interval.lock();
+            if let Some(interval) = use_interval {
+                if interval == 0 {
+                    bot.start_use_item();
+                } else {
+                    *use_counter += 1;
+                    if *use_counter >= interval {
+                        bot.start_use_item();
+                        *use_counter = 0;
+                    }
+                }
+            }
+
+            let mut atk_counter = state.atk_counter.lock();
+            let atk_interval = *state.atk_interval.lock();
+            if let Some(interval) = atk_interval {
+                if interval == 0 {
+                    do_attack(&bot);
+                } else {
+                    *atk_counter += 1;
+                    if *atk_counter >= interval {
+                        do_attack(&bot);
+                        *atk_counter = 0;
+                    }
+                }
+            }
+
+            if bot.ticks_connected() % 10 == 0 {
+                let pos_str = bot.query_self::<&azalea::entity::Position, _>(|p| format!("{:.1}, {:.1}, {:.1}", p.x, p.y, p.z)).unwrap_or_else(|_| "--".to_string());
+                if let Some(ref g_state) = state.global_state {
+                    let mut lock = g_state.write();
+                    if let Some(status) = lock.status.get_mut(&bot_key) {
+                        status.pos = pos_str;
+                        status.delay = bot.ticks_connected();
+                    }
+                }
+            }
+        }
+        Event::Disconnect(reason) => {
+            if let Some(ref g_state) = state.global_state {
+                add_log(g_state, &alias, &format!("已断开连接: {:?}", reason), true, true);
+            }
+            if let Some(ref cmd_tx) = state.cmd_tx {
+                let _ = cmd_tx.send(BotCommand::RemoveActiveClient { alias: alias.clone() });
+            }
+            if let Some(ref g_state) = state.global_state {
+                let mut lock = g_state.write();
+                if let Some(status) = lock.status.get_mut(&bot_key) {
+                    status.online = false;
+                    status.connecting = false;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -113,11 +379,11 @@ async fn main() -> AppExit {
         }
     });
 
-    // 1. 直接运行 (不带参数)：读取或创建 config.yml
+    // 1. 直接运行 (不带参数)：读取或创建 config.yml，并拉起网页服务器与多开任务
     if args.len() == 1 {
         let config_path = exe_dir.join("config.yml");
         if !config_path.exists() {
-            // 自动生成默认 of config.yml 模板文件
+            // 自动生成默认 config.yml 模板文件
             let mut servers = std::collections::HashMap::new();
             let mut bots = std::collections::HashMap::new();
             bots.insert("bot1".to_string(), BotConfig {
@@ -133,7 +399,6 @@ async fn main() -> AppExit {
             servers.insert("localhost:25565".to_string(), bots);
 
             let yaml_str = serde_yaml::to_string(&servers).unwrap();
-            // 将序列化的 null 关键字替换为空白，生成更清爽的 "atk:"
             let yaml_str = yaml_str.replace("null", "");
             let commented_yaml = format!(
                 "# 挂机机器人自动配置文件\n\
@@ -163,124 +428,284 @@ async fn main() -> AppExit {
             }
         };
 
-        if config.is_empty() {
-            println!("[错误] 配置文件中的服务器列表为空！");
-            std::process::exit(1);
+        println!("已载入配置文件，正在初始化挂机控制中心 (Web UI)...");
+
+        // 初始化全局状态
+        let mut configs_map = HashMap::new();
+        let mut status_map = HashMap::new();
+
+        for (server_address, bots) in &config {
+            for (alias, bot_config) in bots {
+                let key = format!("{}|{}", server_address, alias);
+                configs_map.insert(key.clone(), bot_config.clone());
+                status_map.insert(key, WebBotStatus {
+                    online: false,
+                    connecting: false,
+                    delay: 0,
+                    pos: "--".to_string(),
+                });
+            }
         }
 
-        println!("已载入配置文件，正在初始化多开挂机任务...");
-        
-        let local = tokio::task::LocalSet::new();
-        local.run_until(async {
-            let mut join_handles = Vec::new();
+        let global_state = Arc::new(RwLock::new(GlobalAppState {
+            configs: configs_map,
+            status: status_map,
+            logs: VecDeque::new(),
+        }));
 
-            for (server_address, bots) in config {
-                for (alias, bot_config) in bots {
-                    let server_addr = server_address.clone();
-                    let alias_name = alias.clone();
-                    let exe_dir_clone = exe_dir.clone();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<BotCommand>();
 
-                    // 解析 look 视角偏角
-                    let look_target = bot_config.look.as_ref().and_then(|s| {
-                        let parts: Vec<&str> = s.split_whitespace().collect();
-                        if parts.len() == 2 {
-                            if let (Ok(y), Ok(p)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>()) {
-                                return Some((y, p));
+        // 启动独立的单线程后台 OS 线程运行 LocalSet 处理机器人事件
+        let local_state = global_state.clone();
+        let local_exe_dir = exe_dir.clone();
+        let local_cmd_tx = cmd_tx.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                let mut running_bots: HashMap<String, Client> = HashMap::new();
+
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        BotCommand::Start { server, alias } => {
+                            let key = format!("{}|{}", server, alias);
+                            if running_bots.contains_key(&alias) {
+                                continue;
+                            }
+
+                            {
+                                let mut lock = local_state.write();
+                                if let Some(status) = lock.status.get_mut(&key) {
+                                    status.connecting = true;
+                                }
+                            }
+
+                            let state_for_bot = local_state.clone();
+                            let exe_dir_clone = local_exe_dir.clone();
+                            let cmd_tx_clone = local_cmd_tx.clone();
+                            let alias_clone = alias.clone();
+                            let server_clone = server.clone();
+
+                            let (look_target, use_interval, atk_interval) = {
+                                let lock = local_state.read();
+                                let bot_cfg = lock.configs.get(&key).cloned().unwrap_or_default();
+                                let look = bot_cfg.look.as_ref().and_then(|s| {
+                                    let parts: Vec<&str> = s.split_whitespace().collect();
+                                    if parts.len() == 2 {
+                                        if let (Ok(y), Ok(p)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>()) {
+                                            return Some((y, p));
+                                        }
+                                    }
+                                    None
+                                });
+                                (look, parse_mode(&bot_cfg.use_mode), parse_mode(&bot_cfg.atk_mode))
+                            };
+
+                            tokio::task::spawn_local(async move {
+                                let cache_file_path = exe_dir_clone.join(format!("{}.key", alias_clone));
+                                if !cache_file_path.exists() {
+                                    let err_msg = format!("找不到别名 '{}' 对应的授权文件 '{}.key'，无法连接 {}！", alias_clone, alias_clone, server_clone);
+                                    add_log(&state_for_bot, &alias_clone, &err_msg, true, true);
+                                    let mut lock = state_for_bot.write();
+                                    if let Some(status) = lock.status.get_mut(&key) {
+                                        status.connecting = false;
+                                    }
+                                    return;
+                                }
+
+                                let created_secs = get_file_created_secs(&cache_file_path).await;
+
+                                let encrypted_bytes = match std::fs::read(&cache_file_path) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        let err_msg = format!("读取授权文件 {}.key 失败: {:?}", alias_clone, e);
+                                        add_log(&state_for_bot, &alias_clone, &err_msg, true, true);
+                                        return;
+                                    }
+                                };
+
+                                let mini_cache: Vec<MiniCachedAccount> = match decrypt_and_parse_cache(&encrypted_bytes, created_secs) {
+                                    Some(c) => c,
+                                    None => {
+                                        let err_msg = format!("别名 '{}' 的授权文件 {}.key 解密失败！创建时间可能已被系统修改。", alias_clone, alias_clone);
+                                        add_log(&state_for_bot, &alias_clone, &err_msg, true, true);
+                                        return;
+                                    }
+                                };
+
+                                if mini_cache.is_empty() {
+                                    let err_msg = format!("授权文件 {}.key 中未找到已缓存的账号！", alias_clone);
+                                    add_log(&state_for_bot, &alias_clone, &err_msg, true, true);
+                                    return;
+                                }
+
+                                let email = mini_cache[0].cache_key.clone();
+                                let mut auth_opts = azalea::account::microsoft::MicrosoftAccountOpts::default();
+                                auth_opts.cache_file = Some(cache_file_path);
+
+                                add_log(&state_for_bot, &alias_clone, &format!("正在登录账号: {}", email), false, true);
+
+                                let account = match Account::microsoft_with_opts(&email, auth_opts).await {
+                                    Ok(acc) => acc,
+                                    Err(e) => {
+                                        let err_msg = format!("登录失败: {:?}", e);
+                                        add_log(&state_for_bot, &alias_clone, &err_msg, true, true);
+                                        let mut lock = state_for_bot.write();
+                                        if let Some(status) = lock.status.get_mut(&key) {
+                                            status.connecting = false;
+                                        }
+                                        return;
+                                    }
+                                };
+
+                                let initial_state = BotState {
+                                    look_direction: Arc::new(Mutex::new(look_target)),
+                                    use_interval: Arc::new(Mutex::new(use_interval)),
+                                    atk_interval: Arc::new(Mutex::new(atk_interval)),
+                                    global_state: Some(state_for_bot.clone()),
+                                    cmd_tx: Some(cmd_tx_clone.clone()),
+                                    alias: Some(alias_clone.clone()),
+                                    server: Some(server_clone.clone()),
+                                    ..Default::default()
+                                };
+
+                                let _ = ClientBuilder::new()
+                                    .set_handler(handle_web_bot)
+                                    .set_state(initial_state)
+                                    .start(account, server_clone.as_str())
+                                    .await;
+                            });
+                        }
+                        BotCommand::Stop { alias } => {
+                            if let Some(client) = running_bots.remove(&alias) {
+                                add_log(&local_state, &alias, "正在主动断开连接...", false, true);
+                                client.disconnect();
                             }
                         }
-                        None
-                    });
-
-                    // 解析 use 和 atk 间隔
-                    let use_interval = parse_mode(&bot_config.use_mode);
-                    let atk_interval = parse_mode(&bot_config.atk_mode);
-
-                    // 使用 LocalSet 拉起非 Send 的 ClientBuilder::start 任务
-                    let handle = tokio::task::spawn_local(async move {
-                        let cache_file_path = exe_dir_clone.join(format!("{}.key", alias_name));
-                        if !cache_file_path.exists() {
-                            eprintln!("[错误] 找不到别名 '{}' 对应的授权文件 '{}.key'，跳过连接 {}！", alias_name, alias_name, server_addr);
-                            eprintln!("  请先通过命令行登录注册生成它: azalea_bot.exe {} <微软邮箱> {}", server_addr, alias_name);
-                            return;
-                        }
-
-                        // 利用该缓存文件的 UTC 创建时间解密并反解出里面的邮箱
-                        let created_secs = get_file_created_secs(&cache_file_path).await.unwrap_or(0);
-                        let key_str = created_secs.to_string();
-                        let key = key_str.as_bytes();
-
-                        let encrypted_bytes = match std::fs::read(&cache_file_path) {
-                            Ok(b) => b,
-                            Err(e) => {
-                                eprintln!("[错误] 读取授权文件 {}.key 失败: {:?}", alias_name, e);
-                                return;
-                            }
-                        };
-
-                        let mut decrypted_bytes = encrypted_bytes.clone();
-                        if !key.is_empty() {
-                            for (i, byte) in decrypted_bytes.iter_mut().enumerate() {
-                                *byte ^= key[i % key.len()];
+                        BotCommand::SendChat { alias, message } => {
+                            if let Some(client) = running_bots.get(&alias) {
+                                client.chat(&message);
                             }
                         }
-
-                        let mini_cache: Vec<MiniCachedAccount> = match serde_json::from_slice(&decrypted_bytes) {
-                            Ok(c) => c,
-                            Err(_) => {
-                                eprintln!("[错误] 别名 '{}' 的授权文件 {}.key 解密失败！", alias_name, alias_name);
-                                eprintln!("原因: 文件可能损坏，或者它的创建时间被系统重置（例如被复制/拷贝到了其他电脑）。");
-                                return;
-                            }
-                        };
-
-                        if mini_cache.is_empty() {
-                            eprintln!("[错误] 授权文件 {}.key 中未找到已缓存的账号！", alias_name);
-                            return;
+                        BotCommand::RegisterActiveClient { alias, client } => {
+                            running_bots.insert(alias, client);
                         }
-
-                        let email = mini_cache[0].cache_key.clone();
-                        let mut auth_opts = azalea::account::microsoft::MicrosoftAccountOpts::default();
-                        auth_opts.cache_file = Some(cache_file_path);
-
-                        println!("正在拉起任务: 服务器={}, 别名={}, 邮箱={}", server_addr, alias_name, email);
-                        let account = match Account::microsoft_with_opts(&email, auth_opts).await {
-                            Ok(acc) => acc,
-                            Err(e) => {
-                                eprintln!("[错误] 别名 '{}' ({}) 登录失败: {:?}", alias_name, email, e);
-                                return;
-                            }
-                        };
-
-                        let initial_state = State {
-                            look_direction: Arc::new(Mutex::new(look_target)),
-                            use_interval: Arc::new(Mutex::new(use_interval)),
-                            atk_interval: Arc::new(Mutex::new(atk_interval)),
-                            ..Default::default()
-                        };
-
-                        let _ = ClientBuilder::new()
-                            .set_handler(handle)
-                            .set_state(initial_state)
-                            .start(account, server_addr.as_str())
-                            .await;
-                    });
-                    join_handles.push(handle);
+                        BotCommand::RemoveActiveClient { alias } => {
+                            running_bots.remove(&alias);
+                        }
+                    }
                 }
-            }
+            });
+        });
 
-            if join_handles.is_empty() {
-                eprintln!("[错误] 无可启动的任务，程序退出。");
+        // 绑定 Axum API 服务
+        let web_ctx = WebContext {
+            _state: global_state.clone(),
+            cmd_tx,
+        };
+
+        async fn handle_index() -> Html<&'static str> {
+            Html(include_str!("index.html"))
+        }
+
+        #[derive(Serialize)]
+        struct StatusResponse {
+            configs: HashMap<String, BotConfig>,
+            status: HashMap<String, WebBotStatus>,
+        }
+
+        async fn get_status(AxumState(state): AxumState<Arc<RwLock<GlobalAppState>>>) -> Json<StatusResponse> {
+            let lock = state.read();
+            Json(StatusResponse {
+                configs: lock.configs.clone(),
+                status: lock.status.clone(),
+            })
+        }
+
+        async fn get_logs(AxumState(state): AxumState<Arc<RwLock<GlobalAppState>>>) -> Json<Vec<LogMessage>> {
+            let mut lock = state.write();
+            let logs = lock.logs.drain(..).collect::<Vec<_>>();
+            Json(logs)
+        }
+
+        #[derive(Deserialize)]
+        struct ActionPayload {
+            server: Option<String>,
+            alias: String,
+        }
+
+        async fn post_start(
+            AxumState(ctx): AxumState<WebContext>,
+            Json(payload): Json<ActionPayload>,
+        ) -> Result<&'static str, &'static str> {
+            let server = payload.server.ok_or("缺少 server 参数")?;
+            let _ = ctx.cmd_tx.send(BotCommand::Start {
+                server,
+                alias: payload.alias,
+            });
+            Ok("已发送启动指令")
+        }
+
+        async fn post_stop(
+            AxumState(ctx): AxumState<WebContext>,
+            Json(payload): Json<ActionPayload>,
+        ) -> Result<&'static str, &'static str> {
+            let _ = ctx.cmd_tx.send(BotCommand::Stop {
+                alias: payload.alias,
+            });
+            Ok("已发送停止指令")
+        }
+
+        #[derive(Deserialize)]
+        struct ChatPayload {
+            alias: String,
+            message: String,
+        }
+
+        async fn post_send(
+            AxumState(ctx): AxumState<WebContext>,
+            Json(payload): Json<ChatPayload>,
+        ) -> Result<&'static str, &'static str> {
+            let _ = ctx.cmd_tx.send(BotCommand::SendChat {
+                alias: payload.alias,
+                message: payload.message,
+            });
+            Ok("已发送聊天内容")
+        }
+
+        let app = Router::new()
+            .route("/", get(handle_index))
+            .route("/api/status", get(get_status).with_state(global_state.clone()))
+            .route("/api/logs", get(get_logs).with_state(global_state))
+            .route("/api/start", post(post_start))
+            .route("/api/stop", post(post_stop))
+            .route("/api/send", post(post_send))
+            .with_state(web_ctx);
+
+        let port = 14217;
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[错误] 绑定 Web 端口 {} 失败！可能是该端口正被占用。具体错误: {:?}", port, e);
                 std::process::exit(1);
             }
+        };
 
-            // 并发等待所有 Client 任务运行
-            futures::future::join_all(join_handles).await;
-        }).await;
-        
+        println!("==================================================");
+        println!("  Azalea 挂机机器人 Web 控制台启动成功！");
+        println!("  请在手机浏览器（Termux）或电脑浏览器中访问：");
+        println!("  👉 http://localhost:{} 👈", port);
+        println!("==================================================");
+
+        axum::serve(listener, app).await.unwrap();
         std::process::exit(0);
     }
 
-    // 2. 带参数运行：格式解析
+    // 2. 带参数运行：格式解析（向下兼容原本的命令行操作）
     if args.len() < 3 {
         eprintln!("[错误] 缺少必要参数。");
         eprintln!("命令行用法说明:");
@@ -290,9 +715,6 @@ async fn main() -> AppExit {
         eprintln!("     azalea_bot.exe");
         eprintln!("  3. 命令行直接连接服务器并启动:");
         eprintln!("     azalea_bot.exe <服务器地址> <别名> [look <y> <p>] [use [<ticks>]] [atk [<ticks>]]");
-        eprintln!("示例:");
-        eprintln!("  生成 Key: azalea_bot.exe player@outlook.com bot1");
-        eprintln!("  连接服务器: azalea_bot.exe localhost:25565 bot1");
         std::process::exit(1);
     }
 
@@ -317,38 +739,27 @@ async fn main() -> AppExit {
     }
 
     let server_address = &args[1];
-    
-    // 参数提取逻辑
     let email: String;
     let alias: String;
     let mut command_start_index = 3;
 
     if args[2].contains('@') {
-        // 格式 1 (兼容旧版): 首次登录绑定别名并立即连接
         if args.len() < 4 {
             eprintln!("[错误] 首次登录绑定别名必须提供别名参数！");
-            eprintln!("用法: azalea_bot.exe <服务器地址> <微软邮箱> <别名> [命令...]");
             std::process::exit(1);
         }
         email = args[2].clone();
         alias = args[3].clone();
         command_start_index = 4;
-        println!("正在为邮箱 {} 注册绑定别名: {}", email, alias);
     } else {
-        // 格式 2: 直接使用已有别名启动
         alias = args[2].clone();
         let cache_file_path = exe_dir.join(format!("{}.key", alias));
         if !cache_file_path.exists() {
             eprintln!("[错误] 找不到别名 '{}' 对应的授权文件 '{}.key'！", alias, alias);
-            eprintln!("提示: 如果是第一次登录，必须同时传入微软邮箱完成绑定！");
-            eprintln!("用法: azalea_bot.exe {} <微软邮箱> {} [命令...]", server_address, alias);
             std::process::exit(1);
         }
 
-        // 利用该缓存文件的 UTC 创建时间解密并反解出里面的邮箱
-        let created_secs = get_file_created_secs(&cache_file_path).await.unwrap_or(0);
-        let key_str = created_secs.to_string();
-        let key = key_str.as_bytes();
+        let created_secs = get_file_created_secs(&cache_file_path).await;
 
         let encrypted_bytes = match std::fs::read(&cache_file_path) {
             Ok(b) => b,
@@ -358,18 +769,10 @@ async fn main() -> AppExit {
             }
         };
 
-        let mut decrypted_bytes = encrypted_bytes.clone();
-        if !key.is_empty() {
-            for (i, byte) in decrypted_bytes.iter_mut().enumerate() {
-                *byte ^= key[i % key.len()];
-            }
-        }
-
-        let mini_cache: Vec<MiniCachedAccount> = match serde_json::from_slice(&decrypted_bytes) {
-            Ok(c) => c,
-            Err(_) => {
+        let mini_cache: Vec<MiniCachedAccount> = match decrypt_and_parse_cache(&encrypted_bytes, created_secs) {
+            Some(c) => c,
+            None => {
                 eprintln!("[错误] 授权文件 {}.key 解密失败！", alias);
-                eprintln!("原因: 文件可能损坏，或者它的创建时间被系统重置（例如被复制/拷贝到了其他电脑）。");
                 std::process::exit(1);
             }
         };
@@ -380,10 +783,8 @@ async fn main() -> AppExit {
         }
 
         email = mini_cache[0].cache_key.clone();
-        println!("别名 '{}' 动态解析成功，正版邮箱为: {}", alias, email);
     }
 
-    // 动态解析指令配置
     let mut look_target = None;
     let mut use_interval = None;
     let mut atk_interval = None;
@@ -392,41 +793,33 @@ async fn main() -> AppExit {
     while i < args.len() {
         if args[i] == "look" {
             if i + 2 < args.len() {
-                if let (Ok(y_rot), Ok(x_rot)) = (
-                    args[i + 1].parse::<f32>(),
-                    args[i + 2].parse::<f32>(),
-                ) {
+                if let (Ok(y_rot), Ok(x_rot)) = (args[i + 1].parse::<f32>(), args[i + 2].parse::<f32>()) {
                     look_target = Some((y_rot, x_rot));
-                    println!("视角锁定配置成功: 水平角度(yaw)={}, 垂直角度(pitch)={}", y_rot, x_rot);
+                    i += 3;
                 } else {
                     eprintln!("[错误] 视角偏角必须是数字。");
                     std::process::exit(1);
                 }
-                i += 3;
             } else {
-                eprintln!("[错误] 'look' 参数不完整。正确格式: look <yaw> <pitch>");
+                eprintln!("[错误] 'look' 参数不完整。");
                 std::process::exit(1);
             }
         } else if args[i] == "use" {
             if i + 1 < args.len() && args[i + 1].parse::<usize>().is_ok() {
                 let ticks = args[i + 1].parse::<usize>().unwrap();
                 use_interval = Some(ticks);
-                println!("右键使用 (use) 周期配置成功: 每 {} tick 触发一次", ticks);
                 i += 2;
             } else {
-                use_interval = Some(0); // 默认长按
-                println!("右键使用 (use) 周期配置成功: 已开启长按右键模式");
+                use_interval = Some(0);
                 i += 1;
             }
         } else if args[i] == "atk" {
             if i + 1 < args.len() && args[i + 1].parse::<usize>().is_ok() {
                 let ticks = args[i + 1].parse::<usize>().unwrap();
                 atk_interval = Some(ticks);
-                println!("左键攻击 (atk) 周期配置成功: 每 {} tick 触发一次", ticks);
                 i += 2;
             } else {
-                atk_interval = Some(0); // 默认长按
-                println!("左键攻击 (atk) 周期配置成功: 已开启常按连点/挥臂模式");
+                atk_interval = Some(0);
                 i += 1;
             }
         } else {
@@ -435,15 +828,10 @@ async fn main() -> AppExit {
         }
     }
 
-    println!("正在通过微软账号登录: {}", email);
-    
-    // 生成对应的 <别名>.key 缓存路径
     let cache_file_path = exe_dir.join(format!("{}.key", alias));
-
     let mut auth_opts = azalea::account::microsoft::MicrosoftAccountOpts::default();
     auth_opts.cache_file = Some(cache_file_path);
 
-    // Authenticate using Microsoft account.
     let account = match Account::microsoft_with_opts(&email, auth_opts).await {
         Ok(acc) => acc,
         Err(e) => {
@@ -452,17 +840,13 @@ async fn main() -> AppExit {
         }
     };
 
-    println!("正在连接服务器: {}", server_address);
-
-    // 构造具有指定参数的状态实例
-    let initial_state = State {
+    let initial_state = BotState {
         look_direction: Arc::new(Mutex::new(look_target)),
         use_interval: Arc::new(Mutex::new(use_interval)),
         atk_interval: Arc::new(Mutex::new(atk_interval)),
         ..Default::default()
     };
 
-    // Start the client
     ClientBuilder::new()
         .set_handler(handle)
         .set_state(initial_state)
@@ -470,11 +854,8 @@ async fn main() -> AppExit {
         .await
 }
 
-async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
+async fn handle(bot: Client, event: Event, state: BotState) -> eyre::Result<()> {
     match event {
-        Event::Init => {
-            // 初始化事件
-        }
         Event::Spawn => {
             let username = bot.username();
             println!("机器人 {} 已成功在世界中生成！", username);
@@ -484,18 +865,15 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
             }
         }
         Event::Chat(m) => {
-            // 打印聊天
             println!("{}", m.message().to_ansi());
         }
         Event::Tick => {
-            // 锁定朝向偏角
             if let Some((y_rot, x_rot)) = *state.look_direction.lock() {
                 let _ = bot.query_self::<&mut azalea::entity::LookDirection, _>(|mut look| {
                     look.update(azalea::entity::LookDirection::new(y_rot, x_rot));
                 });
             }
 
-            // 触发右键使用
             let mut use_counter = state.use_counter.lock();
             let use_interval = *state.use_interval.lock();
             if let Some(interval) = use_interval {
@@ -510,7 +888,6 @@ async fn handle(bot: Client, event: Event, state: State) -> eyre::Result<()> {
                 }
             }
 
-            // 触发左键攻击
             let mut atk_counter = state.atk_counter.lock();
             let atk_interval = *state.atk_interval.lock();
             if let Some(interval) = atk_interval {

@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azalea 挂机机器人控制台</title>
+    <!-- Google 字体 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(22, 30, 49, 0.7);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-purple: #8b5cf6;
+            --accent-blue: #3b82f6;
+            --status-offline: #ef4444;
+            --status-connecting: #eab308;
+            --status-online: #10b981;
+            --font-main: 'Outfit', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(139, 92, 246, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(59, 130, 246, 0.15) 0px, transparent 50%);
+            color: var(--text-primary);
+            font-family: var(--font-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        /* 顶部导航 */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid var(--card-border);
+            backdrop-filter: blur(12px);
+            background-color: rgba(11, 15, 25, 0.5);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 2.2rem;
+            height: 2.2rem;
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue));
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            color: white;
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.4);
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ffffff 40%, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.025em;
+        }
+
+        .global-actions {
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        /* 主体布局 */
+        main {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 1.5rem;
+            padding: 2rem;
+            flex-grow: 1;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        @media (min-width: 1024px) {
+            main {
+                grid-template-columns: 420px 1fr;
+            }
+        }
+
+        /* 卡片设计 */
+        .glass-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 1rem;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* 机器人卡片列表 */
+        .bot-list {
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            overflow-y: auto;
+            max-height: calc(100vh - 220px);
+        }
+
+        .bot-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 0.75rem;
+            padding: 1rem;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .bot-item::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: transparent;
+            transition: background-color 0.2s;
+        }
+
+        .bot-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.08);
+            transform: translateY(-2px);
+        }
+
+        .bot-item.active {
+            background: rgba(139, 92, 246, 0.08);
+            border-color: rgba(139, 92, 246, 0.3);
+        }
+
+        .bot-item.active::before {
+            background: var(--accent-purple);
+        }
+
+        .bot-info-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .bot-alias-box {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .bot-alias {
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px currentColor;
+        }
+
+        .status-offline { color: var(--status-offline); background-color: var(--status-offline); }
+        .status-connecting { color: var(--status-connecting); background-color: var(--status-connecting); }
+        .status-online { color: var(--status-online); background-color: var(--status-online); }
+
+        .bot-server {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .bot-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+            padding-top: 0.5rem;
+        }
+
+        .bot-controls {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.25rem;
+        }
+
+        /* 按钮样式 */
+        .btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--text-primary);
+            padding: 0.4rem 0.8rem;
+            border-radius: 0.375rem;
+            font-family: var(--font-main);
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.35rem;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn-start {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #34d399;
+        }
+        .btn-start:hover {
+            background: rgba(16, 185, 129, 0.25);
+            border-color: rgba(16, 185, 129, 0.4);
+        }
+
+        .btn-stop {
+            background: rgba(239, 68, 68, 0.15);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #f87171;
+        }
+        .btn-stop:hover {
+            background: rgba(239, 68, 68, 0.25);
+            border-color: rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-all-start {
+            background: linear-gradient(135deg, #10b981, #059669);
+            border: none;
+            color: white;
+            padding: 0.5rem 1rem;
+        }
+        .btn-all-start:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .btn-all-stop {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            border: none;
+            color: white;
+            padding: 0.5rem 1rem;
+        }
+        .btn-all-stop:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        /* 终端输出控制台 */
+        .terminal-panel {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 120px);
+        }
+
+        .terminal-body {
+            background: rgba(10, 12, 18, 0.95);
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            padding: 1.25rem;
+            flex-grow: 1;
+            overflow-y: auto;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .log-entry {
+            line-height: 1.5;
+            word-break: break-all;
+            white-space: pre-wrap;
+            animation: fadeIn 0.15s ease-out;
+        }
+
+        .log-time {
+            color: #555e72;
+            margin-right: 0.5rem;
+            user-select: none;
+        }
+
+        .log-system {
+            color: #3b82f6;
+        }
+
+        .log-chat {
+            color: #e5e7eb;
+        }
+
+        .log-error {
+            color: #ef4444;
+            font-weight: bold;
+        }
+
+        .log-warn {
+            color: #f59e0b;
+        }
+
+        /* 终端底栏 */
+        .terminal-input-bar {
+            padding: 1rem;
+            background: rgba(15, 23, 42, 0.6);
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        .terminal-input {
+            flex-grow: 1;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 0.5rem;
+            color: var(--text-primary);
+            font-family: var(--font-main);
+            padding: 0.6rem 1rem;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        .terminal-input:focus {
+            border-color: var(--accent-purple);
+            box-shadow: 0 0 10px rgba(139, 92, 246, 0.15);
+        }
+
+        /* 空状态提示 */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            flex-grow: 1;
+            gap: 1rem;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .empty-icon {
+            font-size: 3rem;
+            opacity: 0.3;
+        }
+
+        /* 动画 */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 自定义滚动条 */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-section">
+            <div class="logo-icon">A</div>
+            <div>
+                <h1>Azalea 控制台</h1>
+                <div style="font-size: 0.75rem; color: var(--text-secondary);">Minecraft 挂机后台系统</div>
+            </div>
+        </div>
+        <div class="global-actions">
+            <button class="btn btn-all-start" onclick="globalStartAll()">一键开启全部</button>
+            <button class="btn btn-all-stop" onclick="globalStopAll()">一键停止全部</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- 左侧机器人列表 -->
+        <div class="glass-panel">
+            <div class="panel-header">
+                <span class="panel-title">账号列表</span>
+                <span id="bot-count" style="font-size: 0.85rem; color: var(--text-secondary);">加载中...</span>
+            </div>
+            <div class="bot-list" id="bot-list-container">
+                <!-- 动态渲染机器人列表 -->
+                <div class="empty-state">
+                    <div class="empty-icon">🤖</div>
+                    <p>正在获取配置列表...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧日志与控制 -->
+        <div class="glass-panel terminal-panel">
+            <div class="panel-header">
+                <span class="panel-title" id="terminal-title">聊天与日志输出 (未选择机器人)</span>
+                <button class="btn" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;" onclick="clearTerminal()">清空屏幕</button>
+            </div>
+            
+            <!-- 终端日志框 -->
+            <div class="terminal-body" id="terminal-output">
+                <div class="empty-state" id="terminal-empty-view">
+                    <div class="empty-icon">📟</div>
+                    <p>请在左侧列表选中某个已连接的机器人来查看日志并进行聊天</p>
+                </div>
+            </div>
+
+            <!-- 输入栏 -->
+            <div class="terminal-input-bar">
+                <input type="text" class="terminal-input" id="chat-input" placeholder="输入聊天内容或命令，敲击回车发送..." disabled>
+                <button class="btn btn-start" id="send-btn" onclick="sendChatMessage()" disabled>发送</button>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let currentSelectedBot = null;
+        let botConfigData = {};
+        let botStatusData = {};
+        let logBuffer = [];
+
+        // 初始化
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchStatus();
+            fetchLogs();
+            // 每秒轮询状态
+            setInterval(fetchStatus, 1000);
+            // 每 1.5 秒轮询日志
+            setInterval(fetchLogs, 1500);
+
+            // 回车键发送消息
+            document.getElementById('chat-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    sendChatMessage();
+                }
+            });
+        });
+
+        // 轮询获取状态并渲染
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/status');
+                if (!response.ok) throw new Error('网络异常');
+                const data = await response.json();
+                
+                botConfigData = data.configs || {};
+                botStatusData = data.status || {};
+                
+                renderBotList();
+                updateTerminalHeader();
+            } catch (err) {
+                console.error("无法获取状态: ", err);
+            }
+        }
+
+        // 轮询获取日志
+        async function fetchLogs() {
+            try {
+                const response = await fetch('/api/logs');
+                if (!response.ok) throw new Error('网络异常');
+                const logs = await response.json();
+                
+                if (logs && logs.length > 0) {
+                    logBuffer = logBuffer.concat(logs);
+                    // 仅在内存保存最多 1000 条
+                    if (logBuffer.length > 1000) {
+                        logBuffer = logBuffer.slice(logBuffer.length - 1000);
+                    }
+                    renderLogs();
+                }
+            } catch (err) {
+                console.error("无法获取日志: ", err);
+            }
+        }
+
+        // 渲染机器人卡片列表
+        function renderBotList() {
+            const container = document.getElementById('bot-list-container');
+            const keys = Object.keys(botConfigData);
+            
+            document.getElementById('bot-count').innerText = `共 ${keys.length} 个账号`;
+            
+            if (keys.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">⚙️</div>
+                        <p>配置文件 config.yml 中未配置账号，或者配置为空！</p>
+                    </div>`;
+                return;
+            }
+
+            let html = '';
+            for (const itemKey of keys) {
+                const [server, alias] = itemKey.split('|');
+                const isOnline = botStatusData[itemKey] && botStatusData[itemKey].online;
+                const isConnecting = botStatusData[itemKey] && botStatusData[itemKey].connecting;
+                
+                let statusClass = 'status-offline';
+                let statusText = '已离线';
+                if (isOnline) {
+                    statusClass = 'status-online';
+                    statusText = '挂机中';
+                } else if (isConnecting) {
+                    statusClass = 'status-connecting';
+                    statusText = '登录中';
+                }
+
+                const delay = botStatusData[itemKey]?.delay !== undefined ? `${botStatusData[itemKey].delay}ms` : '--';
+                const pos = botStatusData[itemKey]?.pos || '--';
+                const activeClass = currentSelectedBot === itemKey ? 'active' : '';
+
+                html += `
+                    <div class="bot-item ${activeClass}" onclick="selectBot('${itemKey}')">
+                        <div class="bot-info-header">
+                            <div class="bot-alias-box">
+                                <span class="status-dot ${statusClass}"></span>
+                                <span class="bot-alias">${alias}</span>
+                            </div>
+                            <span style="font-size: 0.8rem; font-weight: bold;" class="${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="bot-server" title="${server}">服务器: ${server}</div>
+                        <div class="bot-details">
+                            <div>延迟: ${delay}</div>
+                            <div>坐标: ${pos}</div>
+                        </div>
+                        <div class="bot-controls" onclick="event.stopPropagation()">
+                            ${!isOnline && !isConnecting 
+                                ? `<button class="btn btn-start" onclick="startBot('${server}', '${alias}')">启动</button>`
+                                : `<button class="btn btn-stop" onclick="stopBot('${alias}')">停止</button>`
+                            }
+                        </div>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+
+        // 选择某个账号
+        function selectBot(botKey) {
+            currentSelectedBot = botKey;
+            
+            // 切换激活状态的类样式
+            const items = document.querySelectorAll('.bot-item');
+            items.forEach(el => el.classList.remove('active'));
+            
+            // 启用输入栏
+            const isOnline = botStatusData[botKey] && botStatusData[botKey].online;
+            document.getElementById('chat-input').disabled = !isOnline;
+            document.getElementById('send-btn').disabled = !isOnline;
+            if (isOnline) {
+                document.getElementById('chat-input').placeholder = "说点什么发送到服务器...";
+            } else {
+                document.getElementById('chat-input').placeholder = "该机器人未在线，无法发送消息";
+            }
+
+            renderLogs();
+            renderBotList(); // 刷新高亮
+        }
+
+        function updateTerminalHeader() {
+            const titleEl = document.getElementById('terminal-title');
+            if (currentSelectedBot) {
+                const [server, alias] = currentSelectedBot.split('|');
+                titleEl.innerText = `当前控制: ${alias} | 目标服务器: ${server}`;
+            } else {
+                titleEl.innerText = `聊天与日志输出 (未选择机器人)`;
+            }
+        }
+
+        // 渲染终端日志
+        function renderLogs() {
+            const output = document.getElementById('terminal-output');
+            
+            if (!currentSelectedBot) {
+                // 如果未选择机器人，展示全局未选择面板
+                if (!document.getElementById('terminal-empty-view')) {
+                    output.innerHTML = `
+                        <div class="empty-state" id="terminal-empty-view">
+                            <div class="empty-icon">📟</div>
+                            <p>请在左侧列表选中某个已连接的机器人来查看日志并进行聊天</p>
+                        </div>`;
+                }
+                return;
+            }
+
+            // 移除空视图
+            const emptyView = document.getElementById('terminal-empty-view');
+            if (emptyView) emptyView.remove();
+
+            // 过滤出当前选择的机器人的日志
+            const [_, selectedAlias] = currentSelectedBot.split('|');
+            const botLogs = logBuffer.filter(log => log.alias === selectedAlias);
+
+            // 获取滚动条状态
+            const isAtBottom = output.scrollHeight - output.clientHeight <= output.scrollTop + 20;
+
+            // 渲染
+            let html = '';
+            for (const log of botLogs) {
+                const typeClass = log.is_error ? 'log-error' : (log.is_system ? 'log-system' : 'log-chat');
+                html += `
+                    <div class="log-entry">
+                        <span class="log-time">[${log.time}]</span>
+                        <span class="${typeClass}">${escapeHtml(log.message)}</span>
+                    </div>
+                `;
+            }
+            output.innerHTML = html;
+
+            // 自动滚动到最底部
+            if (isAtBottom || output.scrollTop === 0) {
+                output.scrollTop = output.scrollHeight;
+            }
+        }
+
+        // 动作API调用
+        async function startBot(server, alias) {
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, alias })
+                });
+                if (response.ok) {
+                    fetchStatus();
+                } else {
+                    const text = await response.text();
+                    alert("启动失败: " + text);
+                }
+            } catch (err) {
+                alert("请求失败: " + err);
+            }
+        }
+
+        async function stopBot(alias) {
+            try {
+                const response = await fetch('/api/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ alias })
+                });
+                if (response.ok) {
+                    fetchStatus();
+                }
+            } catch (err) {
+                alert("请求失败: " + err);
+            }
+        }
+
+        async function sendChatMessage() {
+            if (!currentSelectedBot) return;
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message) return;
+
+            const [_, alias] = currentSelectedBot.split('|');
+            try {
+                input.value = '';
+                const response = await fetch('/api/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ alias, message })
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    alert("发送失败: " + text);
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function globalStartAll() {
+            const keys = Object.keys(botConfigData);
+            for (const key of keys) {
+                const [server, alias] = key.split('|');
+                const isOnline = botStatusData[key] && botStatusData[key].online;
+                const isConnecting = botStatusData[key] && botStatusData[key].connecting;
+                if (!isOnline && !isConnecting) {
+                    await startBot(server, alias);
+                }
+            }
+        }
+
+        async function globalStopAll() {
+            const keys = Object.keys(botConfigData);
+            for (const key of keys) {
+                const [_, alias] = key.split('|');
+                const isOnline = botStatusData[key] && botStatusData[key].online;
+                if (isOnline) {
+                    await stopBot(alias);
+                }
+            }
+        }
+
+        function clearTerminal() {
+            logBuffer = [];
+            renderLogs();
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+    </script>
+</body>
+</html>
