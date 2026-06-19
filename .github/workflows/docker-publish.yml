@@ -37,12 +37,29 @@ jobs:
         toolchain: nightly
         targets: ${{ matrix.target }}
 
+    - name: Install Musl Tools (x86_64)
+      if: matrix.target == 'x86_64-unknown-linux-musl'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+
+    - name: Install Musl Cross Toolchain (aarch64)
+      if: matrix.target == 'aarch64-unknown-linux-musl'
+      run: |
+        musl_arch="aarch64-linux-musl-cross"
+        curl -L "https://musl.cc/${musl_arch}.tgz" -o "${musl_arch}.tgz"
+        tar -xzf "${musl_arch}.tgz"
+        echo "$(pwd)/${musl_arch}/bin" >> $GITHUB_PATH
+
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
       with:
         key: ${{ matrix.target }}
 
     - name: Build Release Binary
+      env:
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-musl' && 'aarch64-linux-musl-gcc' || '' }}
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.target == 'x86_64-unknown-linux-musl' && 'musl-gcc' || '' }}
       run: |
         cargo build --release --target ${{ matrix.target }}
 
