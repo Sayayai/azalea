@@ -284,14 +284,36 @@ async fn main() -> AppExit {
     if args.len() < 3 {
         eprintln!("[错误] 缺少必要参数。");
         eprintln!("命令行用法说明:");
-        eprintln!("  1. 首次登录绑定别名 (生成 <别名>.key 授权文件):");
-        eprintln!("     azalea_bot.exe <服务器地址> <微软邮箱> <别名> [look <y> <p>] [use [<ticks>]] [atk [<ticks>]]");
-        eprintln!("  2. 快速使用别名启动 (使用已生成的授权文件):");
+        eprintln!("  1. 仅登录绑定别名 (仅生成 <别名>.key 授权文件，不需要服务器IP):");
+        eprintln!("     azalea_bot.exe <微软邮箱> <别名>");
+        eprintln!("  2. 使用别名启动 (自动多开，读取 config.yml，无需参数):");
+        eprintln!("     azalea_bot.exe");
+        eprintln!("  3. 命令行直接连接服务器并启动:");
         eprintln!("     azalea_bot.exe <服务器地址> <别名> [look <y> <p>] [use [<ticks>]] [atk [<ticks>]]");
         eprintln!("示例:");
-        eprintln!("  首次注册: azalea_bot.exe localhost:25565 player@outlook.com bot1");
-        eprintln!("  别名快速连接并长按攻击: azalea_bot.exe localhost:25565 bot1 atk");
+        eprintln!("  生成 Key: azalea_bot.exe player@outlook.com bot1");
+        eprintln!("  连接服务器: azalea_bot.exe localhost:25565 bot1");
         std::process::exit(1);
+    }
+
+    // 格式 1: 仅登录并生成玩家别名授权文件 (不需要服务器 IP)
+    if args.len() == 3 && args[1].contains('@') {
+        let email = args[1].clone();
+        let alias = args[2].clone();
+        println!("正在通过微软账号登录并生成别名 '{}' 的授权 Key 文件...", alias);
+        let cache_file_path = exe_dir.join(format!("{}.key", alias));
+        let mut auth_opts = azalea::account::microsoft::MicrosoftAccountOpts::default();
+        auth_opts.cache_file = Some(cache_file_path);
+        match Account::microsoft_with_opts(&email, auth_opts).await {
+            Ok(_) => {
+                println!("成功！已生成别名 '{}' 的授权文件。现可将其写入 config.yml 配置文件中进行自动多开挂机！", alias);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("[错误] 微软账号授权登录失败: {:?}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     let server_address = &args[1];
@@ -302,7 +324,7 @@ async fn main() -> AppExit {
     let mut command_start_index = 3;
 
     if args[2].contains('@') {
-        // 格式 1: 首次登录绑定别名
+        // 格式 1 (兼容旧版): 首次登录绑定别名并立即连接
         if args.len() < 4 {
             eprintln!("[错误] 首次登录绑定别名必须提供别名参数！");
             eprintln!("用法: azalea_bot.exe <服务器地址> <微软邮箱> <别名> [命令...]");
