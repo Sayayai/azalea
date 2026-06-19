@@ -1,3 +1,5 @@
 /target
 /azalea-main
 /test
+*.key
+config.yml
