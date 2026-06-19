@@ -4,6 +4,8 @@ on:
   push:
     branches: [ "main" ]
     tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -104,6 +106,6 @@ jobs:
         context: .
         file: ./Dockerfile.ci
         platforms: linux/amd64,linux/arm64
-        push: true
+        push: ${{ github.event_name != 'pull_request' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}

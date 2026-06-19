@@ -4,7 +4,6 @@
 
 ---
 
-## 🚀 部署四步走
 
 ### 第一步：交互式登录，生成玩家别名授权文件 (`.key`)
 因为微软 OAuth 登录需要你在浏览器中输入设备代码完成授权，所以**必须在交互模式 (`-it`) 下运行容器**完成首次登录。此步骤**不需要**指定任何服务器 IP 与端口。
@@ -63,7 +62,6 @@ localhost:25565:          # 连接的服务器地址
 在项目目录下创建 `docker-compose.yml` 配置文件：
 
 ```yaml
-version: '3.8'
 
 services:
   azalea_bot:
@@ -72,7 +70,6 @@ services:
     restart: always
     volumes:
       - ./data:/app
-    # 保持标准输入打开和分配伪终端，防止程序因为 stdin 关闭而退出
     tty: true
     stdin_open: true
 ```
@@ -93,8 +90,3 @@ docker compose down
 ```
 
 ---
-
-## 💡 提示与注意事项
-1. **容器挂载点**：容器内部的工作目录为 `/app`，因此必须将主机的 `./data`（包含 `.key` 授权文件和 `config.yml`）挂载到容器的 `/app`。
-2. **多开限制**：你可以配置任意多个别名和多台服务器，只要 `./data` 下存在对应的 `<别名>.key` 文件即可。
-3. **命令行交互**：若需要在容器后台运行时向游戏内发送指令，可通过 `docker attach azalea_bot` 附加到容器输入聊天信息，使用 `Ctrl + P, Ctrl + Q` 安全退出附加，切勿使用 `Ctrl + C`（会导致容器停止）。
